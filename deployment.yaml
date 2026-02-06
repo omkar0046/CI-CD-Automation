@@ -1,20 +1,21 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend-app
+  name: cicd-app
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: frontend-app
+      app: cicd-app
   template:
     metadata:
       labels:
-        app: frontend-app
+        app: cicd-app
     spec:
       containers:
-      - name: frontend-container
-        image: santhosh3007/mycicdproject:latest   # Jenkins will replace this line
+      - name: cicd-app
+        image: prasanna0707/cicd-app:latest
         ports:
         - containerPort: 80
+
 
