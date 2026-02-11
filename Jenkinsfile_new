@@ -1,0 +1,173 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: maven
+      image: maven:3.9-eclipse-temurin-21
+      command: ["cat"]
+      tty: true
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+    - name: kaniko
+      image: gcr.io/kaniko-project/executor:debug
+      command: ["/busybox/cat"]
+      tty: true
+      volumeMounts:
+        - name: docker-config
+          mountPath: /kaniko/.docker
+    - name: trivy
+      image: aquasec/trivy:latest
+      command: ["cat"]
+      tty: true
+    - name: git
+      image: alpine/git:latest
+      command: ["cat"]
+      tty: true
+  volumes:
+    - name: docker-config
+      secret:
+        secretName: harbor-registry-credentials
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+'''
+        }
+    }
+
+    environment {
+        REGISTRY = "harbor.internal.example.com"
+        IMAGE_NAME = "${REGISTRY}/library/${env.JOB_NAME}"
+        IMAGE_TAG = "${env.GIT_COMMIT[0..7]}-${env.BUILD_NUMBER}"
+        MANIFEST_REPO = "https://github.com/your-org/k8s-manifests.git"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                container('maven') {
+                    sh 'mvn test -B'
+                }
+            }
+            post {
+                always {
+                    junit '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Code Quality - SonarQube') {
+            steps {
+                container('maven') {
+                    withSonarQubeEnv('sonarqube') {
+                        sh 'mvn sonar:sonar -B'
+                    }
+                }
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                container('maven') {
+                    sh 'mvn package -DskipTests -B'
+                }
+            }
+        }
+
+        stage('Build & Push Container Image') {
+            steps {
+                container('kaniko') {
+                    sh """
+                        /kaniko/executor \
+                          --context=\$(pwd) \
+                          --destination=${IMAGE_NAME}:${IMAGE_TAG} \
+                          --destination=${IMAGE_NAME}:latest \
+                          --cache=true \
+                          --cache-repo=${REGISTRY}/library/cache \
+                          --snapshotMode=redo \
+                          --use-new-run
+                    """
+                }
+            }
+        }
+
+        stage('Container Image Scan - Trivy') {
+            steps {
+                container('trivy') {
+                    sh """
+                        trivy image \
+                          --severity HIGH,CRITICAL \
+                          --exit-code 1 \
+                          --no-progress \
+                          --format table \
+                          --output trivy-report.txt \
+                          ${IMAGE_NAME}:${IMAGE_TAG}
+                    """
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-report.txt', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Update GitOps Manifests') {
+            when {
+                anyOf {
+                    branch 'develop'
+                    branch 'release'
+                    branch 'main'
+                }
+            }
+            steps {
+                container('git') {
+                    withCredentials([usernamePassword(credentialsId: 'git-credentials', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+                        sh """
+                            git clone https://\${GIT_USER}:\${GIT_TOKEN}@github.com/your-org/k8s-manifests.git
+                            cd k8s-manifests
+
+                            ENV=""
+                            case "\${BRANCH_NAME}" in
+                                develop) ENV="dev" ;;
+                                release) ENV="qa" ;;
+                                main)    ENV="prod" ;;
+                            esac
+
+                            # Update image tag in kustomization
+                            cd overlays/\${ENV}
+                            sed -i "s|newTag:.*|newTag: ${IMAGE_TAG}|g" kustomization.yaml
+
+                            git config user.email "ci@example.com"
+                            git config user.name "Jenkins CI"
+                            git add .
+                            git commit -m "ci: update \${ENV} image to ${IMAGE_TAG}"
+                            git push
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            // Add notification (Slack, Teams, email)
+            echo "Pipeline failed!"
+        }
+        success {
+            echo "Pipeline succeeded!"
+        }
+    }
+}
