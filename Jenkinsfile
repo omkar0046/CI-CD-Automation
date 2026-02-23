@@ -2,13 +2,16 @@ pipeline {
     agent any
 
     environment {
-        SCANNER_HOME = tool 'SonarScanner'
-        NEXUS_URL = "${env.MASTER_IP}:8082"
-        NEXUS_REPO = "docker-hosted"
-        IMAGE_NAME = "myapp"
-        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'latest'}"
-        DOCKER_IMAGE = "${NEXUS_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
-        SONAR_PROJECT_KEY = "my-app"
+        SCANNER_HOME      = tool 'SonarScanner'
+        MASTER_IP         = '172.31.17.234'
+        NEXUS_URL         = "${MASTER_IP}:8082"
+        NEXUS_REPO        = 'docker-hosted'
+        IMAGE_NAME        = 'myapp'
+        IMAGE_TAG         = "${env.BUILD_NUMBER}-${env.GIT_COMMIT?.take(7) ?: 'latest'}"
+        DOCKER_IMAGE      = "${NEXUS_URL}/${IMAGE_NAME}:${IMAGE_TAG}"
+        SONAR_PROJECT_KEY = 'my-app'
+        GIT_REPO_URL      = 'https://github.com/omkar0046/CI-CD-Automation.git'
+        GIT_BRANCH        = 'main'
     }
 
     parameters {
@@ -33,9 +36,9 @@ pipeline {
 
         stage('Git Checkout') {
             steps {
-                git branch: 'main',
+                git branch: "${GIT_BRANCH}",
                     credentialsId: 'git-credentials',
-                    url: 'https://github.com/<your-org>/<your-repo>.git'
+                    url: "${GIT_REPO_URL}"
             }
         }
 
@@ -86,14 +89,14 @@ pipeline {
             }
             steps {
                 withSonarQubeEnv('SonarQube') {
-                    sh '''
+                    sh """
                         ${SCANNER_HOME}/bin/sonar-scanner \
                             -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                             -Dsonar.projectName=${IMAGE_NAME} \
                             -Dsonar.sources=src/ \
                             -Dsonar.java.binaries=target/classes/ \
                             -Dsonar.sourceEncoding=UTF-8
-                    '''
+                    """
                 }
             }
         }
@@ -124,22 +127,22 @@ pipeline {
 
         stage('Docker Build') {
             steps {
-                script {
-                    sh "docker build -t ${DOCKER_IMAGE} -t ${NEXUS_URL}/${IMAGE_NAME}:latest ."
-                }
+                sh """
+                    docker build -t ${DOCKER_IMAGE} -t ${NEXUS_URL}/${IMAGE_NAME}:latest .
+                """
             }
         }
 
         stage('Trivy Image Scan') {
             steps {
-                sh '''
+                sh """
                     trivy image --severity HIGH,CRITICAL \
                         --format table \
                         --output trivy-image-report.txt \
                         --exit-code 0 \
                         --timeout 10m \
                         ${DOCKER_IMAGE}
-                '''
+                """
                 archiveArtifacts artifacts: 'trivy-image-report.txt', allowEmptyArchive: true
             }
         }
@@ -151,12 +154,23 @@ pipeline {
                     usernameVariable: 'NEXUS_USER',
                     passwordVariable: 'NEXUS_PASS'
                 )]) {
-                    sh '''
-                        echo "${NEXUS_PASS}" | docker login ${NEXUS_URL} -u ${NEXUS_USER} --password-stdin
+                    sh """
+                        echo "\${NEXUS_PASS}" | docker login ${NEXUS_URL} -u \${NEXUS_USER} --password-stdin
                         docker push ${DOCKER_IMAGE}
                         docker push ${NEXUS_URL}/${IMAGE_NAME}:latest
                         docker logout ${NEXUS_URL}
-                    '''
+                    """
+                }
+            }
+        }
+
+        stage('Create Namespace') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    sh """
+                        kubectl --kubeconfig=\${KUBECONFIG} create namespace ${params.DEPLOY_ENV} --dry-run=client -o yaml | \
+                        kubectl --kubeconfig=\${KUBECONFIG} apply -f -
+                    """
                 }
             }
         }
@@ -164,21 +178,21 @@ pipeline {
         stage('Deploy to Kubernetes') {
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-                    sh '''
+                    sh """
                         # Replace image placeholder in deployment manifest
                         sed -i "s|DOCKER_IMAGE_PLACEHOLDER|${DOCKER_IMAGE}|g" k8s/deployment.yaml
 
                         # Apply deployment
-                        kubectl --kubeconfig=${KUBECONFIG} apply -f k8s/deployment.yaml -n ${DEPLOY_ENV}
+                        kubectl --kubeconfig=\${KUBECONFIG} apply -f k8s/deployment.yaml -n ${params.DEPLOY_ENV}
 
                         # Wait for rollout
-                        kubectl --kubeconfig=${KUBECONFIG} rollout status deployment/myapp -n ${DEPLOY_ENV} --timeout=120s
+                        kubectl --kubeconfig=\${KUBECONFIG} rollout status deployment/myapp -n ${params.DEPLOY_ENV} --timeout=120s
 
                         # Show deployment info
                         echo "=== Deployment Status ==="
-                        kubectl --kubeconfig=${KUBECONFIG} get pods -n ${DEPLOY_ENV} -l app=myapp
-                        kubectl --kubeconfig=${KUBECONFIG} get svc -n ${DEPLOY_ENV}
-                    '''
+                        kubectl --kubeconfig=\${KUBECONFIG} get pods -n ${params.DEPLOY_ENV} -l app=myapp
+                        kubectl --kubeconfig=\${KUBECONFIG} get svc -n ${params.DEPLOY_ENV}
+                    """
                 }
             }
         }
@@ -186,18 +200,18 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
-                    sh '''
+                    sh """
                         echo "=== Pod Details ==="
-                        kubectl --kubeconfig=${KUBECONFIG} get pods -n ${DEPLOY_ENV} -l app=myapp -o wide
+                        kubectl --kubeconfig=\${KUBECONFIG} get pods -n ${params.DEPLOY_ENV} -l app=myapp -o wide
 
                         echo ""
                         echo "=== Service Details ==="
-                        kubectl --kubeconfig=${KUBECONFIG} get svc -n ${DEPLOY_ENV}
+                        kubectl --kubeconfig=\${KUBECONFIG} get svc -n ${params.DEPLOY_ENV}
 
                         echo ""
                         echo "=== Recent Events ==="
-                        kubectl --kubeconfig=${KUBECONFIG} get events -n ${DEPLOY_ENV} --sort-by='.lastTimestamp' | tail -10
-                    '''
+                        kubectl --kubeconfig=\${KUBECONFIG} get events -n ${params.DEPLOY_ENV} --sort-by='.lastTimestamp' | tail -10
+                    """
                 }
             }
         }
@@ -205,12 +219,11 @@ pipeline {
 
     post {
         always {
-            // Clean up Docker images to save space on t2.medium
-            sh '''
+            sh """
                 docker rmi ${DOCKER_IMAGE} 2>/dev/null || true
                 docker rmi ${NEXUS_URL}/${IMAGE_NAME}:latest 2>/dev/null || true
                 docker image prune -f 2>/dev/null || true
-            '''
+            """
             cleanWs()
         }
         success {
