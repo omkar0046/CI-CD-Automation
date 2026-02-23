@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         SCANNER_HOME      = tool 'SonarScanner'
-        MASTER_IP         = '172.31.17.234'
+        MASTER_IP         = '52.90.99.154'
         NEXUS_URL         = "${MASTER_IP}:8082"
         NEXUS_REPO        = 'docker-hosted'
         IMAGE_NAME        = 'myapp'
